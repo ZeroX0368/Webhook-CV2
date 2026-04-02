@@ -1,0 +1,133 @@
+import discord
+from discord import Webhook
+import aiohttp
+import asyncio
+
+# --- CẤU HÌNH ---
+WEBHOOK_URL = 'https://discord.com/api/webhooks/1375018617271226378/-ScxnWAEtbWtQZ7tvezZ_r5oASBfBHgmRO_o2c508mfpWuva037Iyve1Idz3KENPQOXN'
+API_URL = "https://test-hub.kys.gay/api/stock"
+LOGO_URL = "http://googleusercontent.com/image_collection/image_retrieval/78615118789308201_0"
+SUPPORT_URL = "https://discord.gg/Zg2XkS5hq9"
+
+async def send_stock_webhook():
+    async with aiohttp.ClientSession() as session:
+        try:
+            # 1. Lấy dữ liệu từ API
+            async with session.get(API_URL) as response:
+                if response.status == 200:
+                    json_data = await response.json()
+                    data = json_data.get('data', {})
+                    timers = json_data.get('timers', {})
+                else:
+                    print(f"❌ Lỗi API: {response.status}")
+                    return
+        except Exception as e:
+            print(f"❌ Lỗi kết nối mạng: {e}")
+            return
+
+        # 2. Tìm fruit đắt nhất (gộp cả 2 kho)
+        all_items = data.get('mirage_stock', []) + data.get('normal_stock', [])
+        top_fruit = max(all_items, key=lambda x: x.get('price_beli', 0), default=None)
+        thumbnail_url = top_fruit.get('image_url', LOGO_URL) if top_fruit else LOGO_URL
+
+        # 3. Hàm hỗ trợ định dạng danh sách trái ác quỷ
+        def format_stock(stock_list):
+            if not stock_list:
+                return "Hiện tại không có stock."
+            lines = []
+            for item in stock_list:
+                name = item.get('name', 'Unknown')
+                price = f"{item.get('price_beli', 0):,}"
+                lines.append(f"• **{name}** — `{price} Beli`")
+            return "\n".join(lines)
+
+        # 4. Khởi tạo Webhook Discord
+        webhook = Webhook.from_url(WEBHOOK_URL, session=session)
+
+        # 5. Xây dựng Components V2 với LayoutView
+        view = discord.ui.LayoutView()
+
+        # Container chính với màu xanh lá
+        container = discord.ui.Container(accent_colour=discord.Colour.green())
+
+        # --- Header: Tiêu đề + Thumbnail fruit đắt nhất ---
+        top_name = top_fruit.get('name', 'Unknown') if top_fruit else 'N/A'
+        top_price = f"{top_fruit.get('price_beli', 0):,}" if top_fruit else 'N/A'
+        header_section = discord.ui.Section(
+            discord.ui.TextDisplay(content="# 🍎 BLOXFRUIT LIVE STOCK"),
+            discord.ui.TextDisplay(
+                content=(
+                    f"Cập nhật danh sách từ hệ thống **{json_data.get('provider', 'BloxFruit')}**\n"
+                    f"-# 👑 Fruit đắt nhất: **{top_name}** — `{top_price} Beli`"
+                )
+            ),
+            accessory=discord.ui.Thumbnail(media=thumbnail_url)
+        )
+        container.add_item(header_section)
+
+        container.add_item(
+            discord.ui.Separator(spacing=discord.SeparatorSpacing.large)
+        )
+
+        # --- Mirage Island Stock ---
+        container.add_item(
+            discord.ui.TextDisplay(
+                content=f"### 🏝️ Mirage Island Stock\n{format_stock(data.get('mirage_stock', []))}"
+            )
+        )
+
+        container.add_item(discord.ui.Separator())
+
+        # --- Normal Shop Stock ---
+        container.add_item(
+            discord.ui.TextDisplay(
+                content=f"### 🛒 Normal Shop Stock\n{format_stock(data.get('normal_stock', []))}"
+            )
+        )
+
+        container.add_item(
+            discord.ui.Separator(spacing=discord.SeparatorSpacing.large)
+        )
+
+        # --- Timers ---
+        reset_text = (
+            f"### ⏰ Trình thời gian\n"
+            f"⏳ Mirage Reset: `{timers.get('mirage_reset_in', 'N/A')}`\n"
+            f"🛒 Normal Reset: `{timers.get('normal_reset_in', 'N/A')}`"
+        )
+        container.add_item(discord.ui.TextDisplay(content=reset_text))
+
+        container.add_item(discord.ui.Separator())
+
+        # --- Button Support (Components V2 ActionRow) ---
+        support_button = discord.ui.Button(
+            style=discord.ButtonStyle.link,
+            label="💬 Support Server",
+            url=SUPPORT_URL
+        )
+        action_row = discord.ui.ActionRow(support_button)
+        container.add_item(action_row)
+
+        container.add_item(discord.ui.Separator())
+
+        # --- Footer nhỏ ---
+        container.add_item(
+            discord.ui.TextDisplay(
+                content="-# BloxFruit Stock Notifier • Tự động cập nhật"
+            )
+        )
+
+        view.add_item(container)
+
+        # 6. Gửi Webhook với Components V2
+        await webhook.send(
+            view=view,
+            username="BloxFruit Bot",
+            avatar_url=LOGO_URL
+        )
+
+        print(f"✅ Đã gửi thông báo Stock thành công! Thumbnail: {top_name} ({top_price} Beli)")
+
+# Chạy chương trình
+if __name__ == "__main__":
+    asyncio.run(send_stock_webhook())
