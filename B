@@ -1,0 +1,131 @@
+import json
+import time
+import uuid
+import re
+import cloudscraper
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+GRAPHQL = "https://publisher.linkvertise.com/graphql"
+
+# Các mẫu truy vấn từ mã nguồn gốc của bạn
+GQL_GET_CONTENT = """
+query getContent($identifier: PublicLinkIdentificationInput!, $action_id: String) {
+  getContent(input: $identifier, action_id: $action_id) {
+    ... on ContentAccessTaskSet {
+      __typename
+      tasks {
+        __typename
+        id
+        ... on WaitTask    { id status }
+        ... on AdTask      { id status }
+      }
+    }
+    ... on DetailPageTargetData {
+      __typename
+      type
+      url
+      paste
+    }
+  }
+}
+"""
+
+GQL_START_TASK = """
+mutation startTask($identifier: PublicLinkIdentificationInput!, $task_id: String!, $task_args: TaskArgument) {
+  startTask(input: $identifier, task_id: $task_id, task_args: $task_args) { id status }
+}
+"""
+
+GQL_COMPLETE_TASK = """
+mutation completeTask($identifier: PublicLinkIdentificationInput!, $task_id: String!, $task_args: TaskArgument) {
+  completeTask(input: $identifier, task_id: $task_id, task_args: $task_args) { id status }
+}
+"""
+
+def extract_data(url):
+    """Trích xuất user_id và slug từ URL"""
+    match = re.search(r"linkvertise\.com/(\d+)/([\w-]+)", url)
+    if match:
+        return match.group(1), match.group(2)
+    return None, None
+
+def gql_call(session, query, variables, headers):
+    resp = session.post(GRAPHQL, json={"query": query, "variables": variables}, headers=headers, timeout=15)
+    return resp.json()
+
+def bypass_linkvertise(target_url, start_time):
+    user_id, slug = extract_data(target_url)
+    
+    if not user_id or not slug:
+        return {"Status": "Error", "result": "Invalid Linkvertise URL format"}
+
+    identifier = {"userIdAndUrl": {"user_id": user_id, "url": slug}}
+    session = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Referer": target_url,
+        "Origin": "https://linkvertise.com",
+        "Content-Type": "application/json",
+    }
+
+    # Thực hiện tối đa 10 vòng lặp xử lý task
+    for _ in range(10):
+        try:
+            resp = gql_call(session, GQL_GET_CONTENT, {"identifier": identifier, "action_id": str(uuid.uuid4())}, headers)
+            data = resp.get("data", {}).get("getContent", {})
+            
+            # Kiểm tra nếu đã nhận được kết quả cuối cùng
+            if data.get("__typename") == "DetailPageTargetData":
+                final_result = data.get("paste") or data.get("url")
+                return {
+                    "Status": "Success",
+                    "result": final_result
+                }
+
+            tasks = data.get("tasks", [])
+            active_task = next((t for t in tasks if t.get("status") in ("OPEN", "IN_PROGRESS")), None)
+            
+            if active_task:
+                t_id = active_task["id"]
+                # Quy trình Start -> Complete task
+                gql_call(session, GQL_START_TASK, {"identifier": identifier, "task_id": t_id, "task_args": {"action_id": str(uuid.uuid4())}}, headers)
+                time.sleep(1) 
+                gql_call(session, GQL_COMPLETE_TASK, {"identifier": identifier, "task_id": t_id, "task_args": {"action_id": str(uuid.uuid4())}}, headers)
+            else:
+                break
+            time.sleep(0.5)
+        except Exception as e:
+            return {"Status": "Error", "result": str(e)}
+
+    return {"Status": "Error", "result": "Bypass failed or timeout"}
+
+@app.route('/api/link', methods=['GET'])
+def api_handler():
+    # Ghi nhận startTime khi nhận request
+    req_start_time = time.time()
+    
+    url = request.args.get('url')
+    if not url:
+        return jsonify({
+            "Status": "Error", 
+            "result": "URL parameter is required",
+            "duration": "0.00s"
+        }), 400
+    
+    # Thực hiện logic bypass
+    response_data = bypass_linkvertise(url, req_start_time)
+    
+    # Tính toán duration theo công cụ yêu cầu (endTime - startTime)
+    end_time = time.time()
+    duration_val = f"{(end_time - req_start_time):.2f}s"
+    
+    # Thêm trường duration vào kết quả cuối cùng
+    response_data["duration"] = duration_val
+    
+    return jsonify(response_data)
+
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=5000)
