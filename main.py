@@ -5,7 +5,7 @@ import asyncio
 from datetime import datetime
 
 # --- CẤU HÌNH ---
-WEBHOOK_URL = 'https://discord.com/api/webhooks/1375018617271226378/-ScxnWAEtbWtQZ7tvezZ_r5oASBfBHgmRO_o2c508mfpWuva037Iyve1Idz3KENPQOXN'
+WEBHOOK_URL = ''
 API_URL = "https://test-hub.kys.gay/api/stock"
 LOGO_URL = "http://googleusercontent.com/image_collection/image_retrieval/78615118789308201_0"
 SUPPORT_URL = "https://discord.gg/Zg2XkS5hq9"
