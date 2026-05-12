@@ -1,0 +1,163 @@
+<?php
+set_time_limit(0);
+ini_set('memory_limit', '256M');
+
+$START_PATH = '/deu-trong-sinh-ai-con-xa-hoi-den/chuong-1-7!K7444mnjzm';
+$OUT_FILE   = __DIR__ . '/../text.txt';
+$LOG_FILE   = '/tmp/fetch_novel.log';
+
+function log_msg($msg) {
+    global $LOG_FILE;
+    $line = '[' . date('H:i:s') . '] ' . $msg . "\n";
+    file_put_contents($LOG_FILE, $line, FILE_APPEND);
+}
+
+function curl_fetch($url) {
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL            => $url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS      => 5,
+        CURLOPT_TIMEOUT        => 25,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => false,
+        CURLOPT_ENCODING       => '',
+        CURLOPT_HTTPHEADER     => [
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language: vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Cache-Control: no-cache',
+            'Pragma: no-cache',
+            'Referer: https://metruyenchu.com.vn/',
+            'Connection: keep-alive',
+            'Upgrade-Insecure-Requests: 1',
+        ],
+    ]);
+    $html = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err  = curl_error($ch);
+    curl_close($ch);
+    if ($html === false || $code !== 200 || strlen($html) < 500) {
+        return ['html' => false, 'code' => $code, 'err' => $err];
+    }
+    return ['html' => $html, 'code' => $code, 'err' => ''];
+}
+
+function parse_chapter($html) {
+    $html = mb_convert_encoding($html, 'UTF-8', 'UTF-8');
+    $dom  = new DOMDocument('1.0', 'UTF-8');
+    libxml_use_internal_errors(true);
+    $dom->loadHTML('<?xml encoding="UTF-8">' . $html);
+    libxml_clear_errors();
+    $xpath = new DOMXPath($dom);
+
+    $title = '';
+    foreach (['//h2[@class="current-chapter"]/a', '//h2[contains(@class,"current-chapter")]'] as $sel) {
+        $n = $xpath->query($sel)->item(0);
+        if ($n && trim($n->textContent)) { $title = trim($n->textContent); break; }
+    }
+
+    $content = '';
+    foreach (['//div[@class="truyen"]', '//div[contains(@class,"chapter-content")]', '//div[contains(@class,"truyen")]'] as $sel) {
+        $n = $xpath->query($sel)->item(0);
+        if ($n) {
+            $raw = $dom->saveHTML($n);
+            $raw = preg_replace('/<div[^>]*>|<\/div>/', '', $raw);
+            $raw = str_replace(['<br>', '<br/>', '<br />', "\r\n", "\r"], "\n", $raw);
+            $raw = strip_tags($raw);
+            $raw = html_entity_decode($raw, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+            $raw = preg_replace('/[ \t]+/', ' ', $raw);
+            $raw = preg_replace('/\n{3,}/', "\n\n", $raw);
+            $raw = trim($raw);
+            if (strlen($raw) > 100) { $content = $raw; break; }
+        }
+    }
+
+    $next = '';
+    foreach (['//a[@class="next"]', '//a[contains(@class,"next")]'] as $sel) {
+        $n = $xpath->query($sel)->item(0);
+        if ($n && $n->hasAttribute('href') && $n->getAttribute('href') !== '#') {
+            $next = $n->getAttribute('href'); break;
+        }
+    }
+
+    $story = '';
+    foreach (['//h1[@class="current-book"]/a', '//h1[contains(@class,"current-book")]'] as $sel) {
+        $n = $xpath->query($sel)->item(0);
+        if ($n && trim($n->textContent)) { $story = trim($n->textContent); break; }
+    }
+
+    return ['title' => $title, 'story' => $story, 'content' => $content, 'next' => $next];
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
+// Clear log
+file_put_contents($LOG_FILE, '');
+log_msg("=== Bắt đầu tải truyện ===");
+log_msg("Đầu ra: $OUT_FILE");
+
+// Init output file with UTF-8 BOM
+file_put_contents($OUT_FILE, "\xEF\xBB\xBF");
+
+$path         = $START_PATH;
+$chapNum      = 0;
+$failStreak   = 0;
+$storyWritten = false;
+
+while ($path) {
+    $path = preg_replace('/[^a-zA-Z0-9\-_!\/]/', '', $path);
+    $url  = 'https://metruyenchu.com.vn' . $path;
+
+    $res  = null;
+    for ($try = 1; $try <= 4; $try++) {
+        $res = curl_fetch($url);
+        if ($res['html'] !== false) break;
+        log_msg("  Retry $try cho $path (HTTP {$res['code']}, {$res['err']})");
+        sleep($try);
+    }
+
+    if ($res['html'] === false) {
+        $failStreak++;
+        log_msg("WARN: Bỏ qua $path — không lấy được (liên tiếp: $failStreak)");
+        if ($failStreak >= 5) {
+            log_msg("ERR: Lỗi liên tiếp 5 lần — dừng.");
+            break;
+        }
+        // Parse whatever we got to at least grab next link
+        $data = ['title' => '', 'story' => '', 'content' => '', 'next' => ''];
+    } else {
+        $failStreak = 0;
+        $data = parse_chapter($res['html']);
+    }
+
+    if (!empty($data['content'])) {
+        $chapNum++;
+
+        if (!$storyWritten) {
+            $storyName = $data['story'] ?: 'Đều Trọng Sinh Ai Còn Xã Hội Đen';
+            file_put_contents($OUT_FILE, $storyName . "\n" . str_repeat('═', 70) . "\n\n", FILE_APPEND);
+            $storyWritten = true;
+            log_msg("Truyện: $storyName");
+        }
+
+        $block = ($data['title'] ? $data['title'] . "\n" . str_repeat('─', 60) . "\n\n" : '')
+               . $data['content'] . "\n\n\n";
+        file_put_contents($OUT_FILE, $block, FILE_APPEND);
+
+        if ($chapNum % 50 === 0) {
+            $kb = round(filesize($OUT_FILE) / 1024);
+            log_msg(">>> Đã tải: $chapNum chương | File: {$kb} KB");
+        } else {
+            log_msg("[{$chapNum}] " . ($data['title'] ?: $path));
+        }
+    }
+
+    $path = $data['next'] ?? '';
+    usleep(300000); // 300ms between requests
+}
+
+$finalKb = round(filesize($OUT_FILE) / 1024);
+log_msg("=== XONG: $chapNum chương | File: {$finalKb} KB ===");
